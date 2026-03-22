@@ -3,80 +3,185 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 
+/**
+ * Middleware: Authentication
+ * - Extracts JWT token from Authorization header
+ * - Verifies token and attaches userId to request
+ */
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
+
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
-    req.userId = decoded.id;
+    req.userId = decoded.id; // Attach user ID to request for downstream use
     next();
   } catch (error) {
     res.status(401).json({ error: 'Invalid token' });
   }
 };
 
+/**
+ * GET /
+ * Fetch all transactions for the logged-in user
+ * - Sorted by most recent (created_at DESC)
+ */
 router.get('/', auth, (req, res) => {
-  db.query('SELECT * FROM transactions WHERE user_id = ? ORDER BY created_at DESC', [req.userId], (err, results) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json(results);
-  });
+  db.query(
+    'SELECT * FROM transactions WHERE user_id = ? ORDER BY created_at DESC',
+    [req.userId],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json(results);
+    }
+  );
 });
 
+/**
+ * POST /
+ * Add a new transaction
+ * - Inserts transaction into DB
+ * - Updates corresponding account balance
+ *   (income adds, expense subtracts)
+ */
 router.post('/', auth, (req, res) => {
   const { type, amount, category, division, description, account } = req.body;
-  db.query('INSERT INTO transactions (user_id, type, amount, category, division, description, account) VALUES (?, ?, ?, ?, ?, ?, ?)', 
-    [req.userId, type, amount, category, division || 'Personal', description, account], (err, result) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    const balanceChange = type === 'income' ? parseFloat(amount) : -parseFloat(amount);
-    db.query('UPDATE accounts SET balance = balance + ? WHERE user_id = ? AND name = ?', [balanceChange, req.userId, account], () => {});
-    res.status(201).json({ id: result.insertId, message: 'Transaction created' });
-  });
+
+  db.query(
+    'INSERT INTO transactions (user_id, type, amount, category, division, description, account) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [req.userId, type, amount, category, division || 'Personal', description, account],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+
+      // Determine how this transaction affects account balance
+      const balanceChange =
+        type === 'income' ? parseFloat(amount) : -parseFloat(amount);
+
+      // Update the associated account balance
+      db.query(
+        'UPDATE accounts SET balance = balance + ? WHERE user_id = ? AND name = ?',
+        [balanceChange, req.userId, account],
+        () => {}
+      );
+
+      res.status(201).json({
+        id: result.insertId,
+        message: 'Transaction created'
+      });
+    }
+  );
 });
 
+/**
+ * PUT /:id
+ * Update an existing transaction
+ * - Only updates fields (amount, category, division, description)
+ * - Does NOT adjust account balance (important limitation)
+ */
 router.put('/:id', auth, (req, res) => {
   const { amount, category, division, description } = req.body;
-  db.query('UPDATE transactions SET amount = ?, category = ?, division = ?, description = ? WHERE id = ? AND user_id = ?', 
-    [amount, category, division, description, req.params.id, req.userId], (err, result) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    if (result.affectedRows === 0) return res.status(404).json({ error: 'Not found' });
-    res.json({ message: 'Updated' });
-  });
+
+  db.query(
+    'UPDATE transactions SET amount = ?, category = ?, division = ?, description = ? WHERE id = ? AND user_id = ?',
+    [amount, category, division, description, req.params.id, req.userId],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+
+      if (result.affectedRows === 0)
+        return res.status(404).json({ error: 'Not found' });
+
+      res.json({ message: 'Updated' });
+    }
+  );
 });
 
+/**
+ * GET /summary/:view
+ * Generate transaction summaries by type (income vs expense)
+ * - Supports:
+ *   weekly  → last 7 days
+ *   monthly → last 30 days
+ *   yearly  → last 365 days
+ */
 router.get('/summary/:view', auth, (req, res) => {
   let dateFilter = '';
-  if (req.params.view === 'weekly') dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
-  else if (req.params.view === 'monthly') dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
-  else if (req.params.view === 'yearly') dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 365 DAY)';
-  
-  db.query(`SELECT type, SUM(amount) as total FROM transactions WHERE user_id = ? ${dateFilter} GROUP BY type`, [req.userId], (err, results) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json(results);
-  });
+
+  if (req.params.view === 'weekly')
+    dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
+  else if (req.params.view === 'monthly')
+    dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
+  else if (req.params.view === 'yearly')
+    dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 365 DAY)';
+
+  db.query(
+    `SELECT type, SUM(amount) as total 
+     FROM transactions 
+     WHERE user_id = ? ${dateFilter} 
+     GROUP BY type`,
+    [req.userId],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json(results);
+    }
+  );
 });
 
+/**
+ * GET /summary/category
+ * Generate expense breakdown by category
+ * - Only considers transactions of type 'expense'
+ */
 router.get('/summary/category', auth, (req, res) => {
-  db.query('SELECT category, SUM(amount) as total FROM transactions WHERE user_id = ? AND type = ? GROUP BY category', 
-    [req.userId, 'expense'], (err, results) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json(results);
-  });
+  db.query(
+    'SELECT category, SUM(amount) as total FROM transactions WHERE user_id = ? AND type = ? GROUP BY category',
+    [req.userId, 'expense'],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json(results);
+    }
+  );
 });
 
+/**
+ * GET /accounts
+ * Fetch all accounts for the user
+ * - Includes current balances
+ */
 router.get('/accounts', auth, (req, res) => {
-  db.query('SELECT * FROM accounts WHERE user_id = ?', [req.userId], (err, results) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json(results);
-  });
+  db.query(
+    'SELECT * FROM accounts WHERE user_id = ?',
+    [req.userId],
+    (err, results) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+      res.json(results);
+    }
+  );
 });
 
+/**
+ * POST /accounts
+ * Create a new account
+ * - Requires account name
+ * - Defaults balance to 0 if not provided
+ */
 router.post('/accounts', auth, (req, res) => {
   const { name, balance } = req.body;
-  if (!name) return res.status(400).json({ error: 'Account name required' });
-  db.query('INSERT INTO accounts (user_id, name, balance) VALUES (?, ?, ?)', [req.userId, name, balance || 0], (err, result) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.status(201).json({ id: result.insertId, message: 'Account created' });
-  });
+
+  if (!name)
+    return res.status(400).json({ error: 'Account name required' });
+
+  db.query(
+    'INSERT INTO accounts (user_id, name, balance) VALUES (?, ?, ?)',
+    [req.userId, name, balance || 0],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'Database error' });
+
+      res.status(201).json({
+        id: result.insertId,
+        message: 'Account created'
+      });
+    }
+  );
 });
 
 module.exports = router;
