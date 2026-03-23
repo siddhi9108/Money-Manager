@@ -6,11 +6,30 @@ const connectDB = require('./db');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Connect to MongoDB
-connectDB();
+// Middleware to ensure DB connection
+let dbConnectionPromise = null;
+
+const ensureDbConnection = async (req, res, next) => {
+  try {
+    if (!dbConnectionPromise) {
+      dbConnectionPromise = connectDB();
+    }
+    await dbConnectionPromise;
+    next();
+  } catch (error) {
+    console.error('Database connection error:', error);
+    res.status(503).json({ 
+      error: 'Database connection failed', 
+      message: 'Service temporarily unavailable' 
+    });
+  }
+};
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+
+// Apply DB connection middleware to all routes except health check
+app.use('/api', ensureDbConnection);
 
 const authRoutes = require('./routes/auth');
 const transactionRoutes = require('./routes/transactions');
@@ -22,7 +41,7 @@ app.get('/', (req, res) => {
   res.json({ message: 'Money Manager API is running', status: 'active' });
 });
 
-// Health check endpoint for keep-alive
+// Health check endpoint (no DB required)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
