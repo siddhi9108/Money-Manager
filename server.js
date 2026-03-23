@@ -17,10 +17,11 @@ const ensureDbConnection = async (req, res, next) => {
     await dbConnectionPromise;
     next();
   } catch (error) {
-    console.error('Database connection error:', error);
+    dbConnectionPromise = null; // Reset so next request retries
+    console.error('Database connection error:', error.message);
     res.status(503).json({ 
       error: 'Database connection failed', 
-      message: 'Service temporarily unavailable' 
+      message: error.message 
     });
   }
 };
@@ -43,7 +44,15 @@ app.get('/', (req, res) => {
 
 // Health check endpoint (no DB required)
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    env: {
+      mongoUri: process.env.MONGODB_URI ? 'SET' : 'NOT SET',
+      jwtSecret: process.env.JWT_SECRET ? 'SET' : 'NOT SET',
+      nodeEnv: process.env.NODE_ENV || 'not set'
+    }
+  });
 });
 
 app.use((err, req, res, next) => {
