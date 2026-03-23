@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
 const jwt = require('jsonwebtoken');
+const Transaction = require('../models/Transaction');
+const Account = require('../models/Account');
 
 /**
  * Middleware: Authentication
@@ -26,15 +27,14 @@ const auth = (req, res, next) => {
  * Fetch all transactions for the logged-in user
  * - Sorted by most recent (created_at DESC)
  */
-router.get('/', auth, (req, res) => {
-  db.query(
-    'SELECT * FROM transactions WHERE user_id = ? ORDER BY created_at DESC',
-    [req.userId],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
-      res.json(results);
-    }
-  );
+router.get('/', auth, async (req, res) => {
+  try {
+    const transactions = await Transaction.find({ user_id: req.userId })
+      .sort({ createdAt: -1 });
+    res.json(transactions);
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 /**
@@ -44,32 +44,38 @@ router.get('/', auth, (req, res) => {
  * - Updates corresponding account balance
  *   (income adds, expense subtracts)
  */
-router.post('/', auth, (req, res) => {
+router.post('/', auth, async (req, res) => {
   const { type, amount, category, division, description, account } = req.body;
 
-  db.query(
-    'INSERT INTO transactions (user_id, type, amount, category, division, description, account) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [req.userId, type, amount, category, division || 'Personal', description, account],
-    (err, result) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
+  try {
+    const transaction = new Transaction({
+      user_id: req.userId,
+      type,
+      amount,
+      category,
+      division: division || 'Personal',
+      description,
+      account
+    });
 
-      // Determine how this transaction affects account balance
-      const balanceChange =
-        type === 'income' ? parseFloat(amount) : -parseFloat(amount);
+    await transaction.save();
 
-      // Update the associated account balance
-      db.query(
-        'UPDATE accounts SET balance = balance + ? WHERE user_id = ? AND name = ?',
-        [balanceChange, req.userId, account],
-        () => {}
-      );
+    // Determine how this transaction affects account balance
+    const balanceChange = type === 'income' ? parseFloat(amount) : -parseFloat(amount);
 
-      res.status(201).json({
-        id: result.insertId,
-        message: 'Transaction created'
-      });
-    }
-  );
+    // Update the associated account balance
+    await Account.findOneAndUpdate(
+      { user_id: req.userId, name: account },
+      { $inc: { balance: balanceChange } }
+    );
+
+    res.status(201).json({
+      id: transaction._id,
+      message: 'Transaction created'
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 /**
@@ -78,21 +84,23 @@ router.post('/', auth, (req, res) => {
  * - Only updates fields (amount, category, division, description)
  * - Does NOT adjust account balance (important limitation)
  */
-router.put('/:id', auth, (req, res) => {
+router.put('/:id', auth, async (req, res) => {
   const { amount, category, division, description } = req.body;
 
-  db.query(
-    'UPDATE transactions SET amount = ?, category = ?, division = ?, description = ? WHERE id = ? AND user_id = ?',
-    [amount, category, division, description, req.params.id, req.userId],
-    (err, result) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
+  try {
+    const transaction = await Transaction.findOneAndUpdate(
+      { _id: req.params.id, user_id: req.userId },
+      { amount, category, division, description },
+      { new: true }
+    );
 
-      if (result.affectedRows === 0)
-        return res.status(404).json({ error: 'Not found' });
+    if (!transaction)
+      return res.status(404).json({ error: 'Not found' });
 
-      res.json({ message: 'Updated' });
-    }
-  );
+    res.json({ message: 'Updated' });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 /**
@@ -103,27 +111,29 @@ router.put('/:id', auth, (req, res) => {
  *   monthly → last 30 days
  *   yearly  → last 365 days
  */
-router.get('/summary/:view', auth, (req, res) => {
-  let dateFilter = '';
+router.get('/summary/:view', auth, async (req, res) => {
+  try {
+    let dateFilter = {};
+    const now = new Date();
 
-  if (req.params.view === 'weekly')
-    dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)';
-  else if (req.params.view === 'monthly')
-    dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)';
-  else if (req.params.view === 'yearly')
-    dateFilter = 'AND created_at >= DATE_SUB(NOW(), INTERVAL 365 DAY)';
-
-  db.query(
-    `SELECT type, SUM(amount) as total 
-     FROM transactions 
-     WHERE user_id = ? ${dateFilter} 
-     GROUP BY type`,
-    [req.userId],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
-      res.json(results);
+    if (req.params.view === 'weekly') {
+      dateFilter = { createdAt: { $gte: new Date(now.setDate(now.getDate() - 7)) } };
+    } else if (req.params.view === 'monthly') {
+      dateFilter = { createdAt: { $gte: new Date(now.setDate(now.getDate() - 30)) } };
+    } else if (req.params.view === 'yearly') {
+      dateFilter = { createdAt: { $gte: new Date(now.setDate(now.getDate() - 365)) } };
     }
-  );
+
+    const results = await Transaction.aggregate([
+      { $match: { user_id: req.userId, ...dateFilter } },
+      { $group: { _id: '$type', total: { $sum: '$amount' } } },
+      { $project: { type: '$_id', total: 1, _id: 0 } }
+    ]);
+
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 /**
@@ -131,15 +141,18 @@ router.get('/summary/:view', auth, (req, res) => {
  * Generate expense breakdown by category
  * - Only considers transactions of type 'expense'
  */
-router.get('/summary/category', auth, (req, res) => {
-  db.query(
-    'SELECT category, SUM(amount) as total FROM transactions WHERE user_id = ? AND type = ? GROUP BY category',
-    [req.userId, 'expense'],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
-      res.json(results);
-    }
-  );
+router.get('/summary/category', auth, async (req, res) => {
+  try {
+    const results = await Transaction.aggregate([
+      { $match: { user_id: req.userId, type: 'expense' } },
+      { $group: { _id: '$category', total: { $sum: '$amount' } } },
+      { $project: { category: '$_id', total: 1, _id: 0 } }
+    ]);
+
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 /**
@@ -147,15 +160,13 @@ router.get('/summary/category', auth, (req, res) => {
  * Fetch all accounts for the user
  * - Includes current balances
  */
-router.get('/accounts', auth, (req, res) => {
-  db.query(
-    'SELECT * FROM accounts WHERE user_id = ?',
-    [req.userId],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
-      res.json(results);
-    }
-  );
+router.get('/accounts', auth, async (req, res) => {
+  try {
+    const accounts = await Account.find({ user_id: req.userId });
+    res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 /**
@@ -164,24 +175,28 @@ router.get('/accounts', auth, (req, res) => {
  * - Requires account name
  * - Defaults balance to 0 if not provided
  */
-router.post('/accounts', auth, (req, res) => {
+router.post('/accounts', auth, async (req, res) => {
   const { name, balance } = req.body;
 
   if (!name)
     return res.status(400).json({ error: 'Account name required' });
 
-  db.query(
-    'INSERT INTO accounts (user_id, name, balance) VALUES (?, ?, ?)',
-    [req.userId, name, balance || 0],
-    (err, result) => {
-      if (err) return res.status(500).json({ error: 'Database error' });
+  try {
+    const account = new Account({
+      user_id: req.userId,
+      name,
+      balance: balance || 0
+    });
 
-      res.status(201).json({
-        id: result.insertId,
-        message: 'Account created'
-      });
-    }
-  );
+    await account.save();
+
+    res.status(201).json({
+      id: account._id,
+      message: 'Account created'
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
 
 module.exports = router;

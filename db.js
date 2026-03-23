@@ -1,42 +1,32 @@
-const mysql = require('mysql2');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
-// Create connection pool instead of single connection
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT || 3306,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 0
-});
-
-// Test the connection
-pool.getConnection((err, connection) => {
-  if (err) {
-    console.error('❌ Database connection failed:', err.message);
-    console.error('Connection config:', {
-      host: process.env.DB_HOST,
-      port: process.env.DB_PORT,
-      user: process.env.DB_USER,
-      database: process.env.DB_NAME
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      serverApi: {
+        version: '1',
+        strict: true,
+        deprecationErrors: true,
+      }
     });
-  } else {
-    console.log('✅ Connected to MySQL database successfully');
-    connection.release(); // Release the connection back to pool
+    
+    console.log('✅ Connected to MongoDB database successfully');
+    console.log(`📍 Database Host: ${conn.connection.host}`);
+  } catch (err) {
+    console.error('❌ Database connection failed:', err.message);
+    console.error('Connection URI:', process.env.MONGODB_URI ? 'Set (hidden for security)' : 'Not set');
+    process.exit(1);
   }
+};
+
+// Handle connection events
+mongoose.connection.on('error', (err) => {
+  console.error('❌ Database error:', err);
 });
 
-// Handle pool errors
-pool.on('error', (err) => {
-  console.error('❌ Database pool error:', err);
-  if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-    console.log('⚠️ Database connection lost. Pool will reconnect automatically.');
-  }
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️ Database disconnected');
 });
 
-module.exports = pool;
+module.exports = connectDB;

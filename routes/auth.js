@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const db = require('../db');
+const User = require('../models/User');
 
 // Signup route
 router.post('/signup', async (req, res) => {
@@ -22,35 +22,26 @@ router.post('/signup', async (req, res) => {
 
   try {
     console.log('🔍 Checking if email exists...');
-    db.query('SELECT id FROM users WHERE email = ?', [email], async (err, results) => {
-      if (err) {
-        console.error('❌ Database query error:', err.message);
-        return res.status(500).json({ error: 'Database error: ' + err.message });
-      }
-      
-      if (results.length > 0) {
-        console.log('❌ Email already exists:', email);
-        return res.status(400).json({ error: 'Email already exists' });
-      }
+    const existingUser = await User.findOne({ email });
+    
+    if (existingUser) {
+      console.log('❌ Email already exists:', email);
+      return res.status(400).json({ error: 'Email already exists' });
+    }
 
-      try {
-        console.log('🔐 Hashing password...');
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        console.log('💾 Inserting user into database...');
-        db.query('INSERT INTO users (name, email, password) VALUES (?, ?, ?)', [name, email, hashedPassword], (err, result) => {
-          if (err) {
-            console.error('❌ Insert error:', err.message);
-            return res.status(500).json({ error: 'Failed to create user: ' + err.message });
-          }
-          console.log('✅ User created successfully with ID:', result.insertId);
-          res.status(201).json({ message: 'User created successfully', userId: result.insertId });
-        });
-      } catch (hashError) {
-        console.error('❌ Password hashing error:', hashError.message);
-        res.status(500).json({ error: 'Password hashing failed: ' + hashError.message });
-      }
+    console.log('🔐 Hashing password...');
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    console.log('💾 Creating user in database...');
+    const user = new User({
+      name,
+      email,
+      password: hashedPassword
     });
+    
+    await user.save();
+    console.log('✅ User created successfully with ID:', user._id);
+    res.status(201).json({ message: 'User created successfully', userId: user._id });
   } catch (error) {
     console.error('❌ Signup error:', error.message);
     res.status(500).json({ error: 'Server error: ' + error.message });
@@ -58,7 +49,7 @@ router.post('/signup', async (req, res) => {
 });
 
 // Login route
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   console.log('🔐 Login request received:', { email: req.body.email });
   const { email, password } = req.body;
 
@@ -68,51 +59,45 @@ router.post('/login', (req, res) => {
     return res.status(400).json({ error: 'Email and password required' });
   }
 
-  console.log('🔍 Looking up user...');
-  db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-    if (err) {
-      console.error('❌ Database error:', err.message);
-      return res.status(500).json({ error: 'Database error: ' + err.message });
-    }
+  try {
+    console.log('🔍 Looking up user...');
+    const user = await User.findOne({ email });
 
-    if (results.length === 0) {
+    if (!user) {
       console.log('❌ User not found:', email);
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const user = results[0];
-    console.log('👤 User found:', user.id);
+    console.log('👤 User found:', user._id);
 
-    try {
-      console.log('🔐 Comparing password...');
-      const validPassword = await bcrypt.compare(password, user.password);
-      
-      if (!validPassword) {
-        console.log('❌ Invalid password for user:', email);
-        return res.status(401).json({ error: 'Invalid email or password' });
-      }
-
-      console.log('🎫 Generating JWT token...');
-      const token = jwt.sign(
-        { id: user.id, email: user.email }, 
-        process.env.JWT_SECRET || 'fallback-secret-key', 
-        { expiresIn: '30d' }
-      );
-      
-      console.log('✅ Login successful for user:', email);
-      res.json({ 
-        token, 
-        user: { 
-          id: user.id, 
-          name: user.name, 
-          email: user.email 
-        } 
-      });
-    } catch (compareError) {
-      console.error('❌ Password comparison error:', compareError.message);
-      res.status(500).json({ error: 'Authentication failed: ' + compareError.message });
+    console.log('🔐 Comparing password...');
+    const validPassword = await bcrypt.compare(password, user.password);
+    
+    if (!validPassword) {
+      console.log('❌ Invalid password for user:', email);
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
-  });
+
+    console.log('🎫 Generating JWT token...');
+    const token = jwt.sign(
+      { id: user._id, email: user.email }, 
+      process.env.JWT_SECRET || 'fallback-secret-key', 
+      { expiresIn: '30d' }
+    );
+    
+    console.log('✅ Login successful for user:', email);
+    res.json({ 
+      token, 
+      user: { 
+        id: user._id, 
+        name: user.name, 
+        email: user.email 
+      } 
+    });
+  } catch (error) {
+    console.error('❌ Login error:', error.message);
+    res.status(500).json({ error: 'Authentication failed: ' + error.message });
+  }
 });
 
 module.exports = router;
